@@ -11,8 +11,10 @@ import os
 import cv2
 import numpy as np
 from datetime import datetime
+import base64
+import random
 
-# FORCE DEPLOY v2.1 - Tabs Removed (Retry Build)
+# FORCE DEPLOY v2.4 - Animation Rendering Fix
 
 st.set_page_config(
     page_title="予約カードOCRシステム",
@@ -121,6 +123,22 @@ def local_css():
         }
     }
     
+    /* アニメーション定義 */
+    @keyframes floatUp {
+        0% { bottom: -150px; transform: translateX(0) rotate(0deg); opacity: 0; }
+        10% { opacity: 1; }
+        25% { transform: translateX(20px) rotate(5deg); }
+        50% { transform: translateX(-20px) rotate(-5deg); }
+        75% { transform: translateX(10px) rotate(3deg); opacity: 0.9; }
+        100% { bottom: 100vh; transform: translateX(0) rotate(0deg); opacity: 0; }
+    }
+    
+    .floating-container {
+        position: fixed;
+        left: 0; top: 0; width: 100%; height: 100%;
+        pointer-events: none; z-index: 9999; overflow: hidden;
+    }
+    
     .footer {
         width: 100%;
         text-align: center;
@@ -180,20 +198,8 @@ def parse_ocr_residue(text):
         "氏名": "", "年齢": "", "職業": "", "住所": "",
         "電話番号": "", "メールアドレス": "", "チェックイン日": "", "チェックアウト日": ""
     }
-    
     full_text = text.replace('\n', ' ').replace('　', ' ')
-    
-    headers = [
-        "氏名", "名前", "Name", "Guest Name", 
-        "年齢", "Age", 
-        "ご職業", "職業", "Occupation", "Job",
-        "住所", "Address", "住 所",
-        "電話番号", "電話", "Tel", "Phone", "Mobile", "Cell",
-        "メールアドレス", "メール", "Email", "E-mail", "Mail",
-        "チェックイン日", "チェックイン", "Check-in",
-        "チェックアウト日", "チェックアウト", "Check-out",
-        "お客様記入欄", "ホテル使用欄", "区分", "金額", "小計", "合計"
-    ]
+    headers = ["氏名", "名前", "Name", "Guest Name", "年齢", "Age", "ご職業", "職業", "Occupation", "Job", "住所", "Address", "住 所", "電話番号", "電話", "Tel", "Phone", "Mobile", "Cell", "メールアドレス", "メール", "Email", "E-mail", "Mail", "チェックイン日", "チェックイン", "Check-in", "チェックアウト日", "チェックアウト", "Check-out", "お客様記入欄", "ホテル使用欄", "区分", "金額", "小計", "合計"]
     residue_text = full_text
     for h in headers:
         residue_text = residue_text.replace(h, " ")
@@ -226,8 +232,6 @@ def parse_ocr_residue(text):
 
     pref_pattern = r'(北海道|青森県|岩手県|宮城県|秋田県|山形県|福島県|茨城県|栃木県|群馬県|埼玉県|千葉県|東京都|神奈川県|新潟県|富山県|石川県|福井県|山梨県|長野県|岐阜県|静岡県|愛知県|三重県|滋賀県|京都府|大阪府|兵庫県|奈良県|和歌山県|鳥取県|島根県|岡山県|広島県|山口県|徳島県|香川県|愛媛県|高知県|福岡県|佐賀県|長崎県|熊本県|大分県|宮崎県|鹿児島県|沖縄県)'
     addr_match = re.search(pref_pattern, residue_text)
-    potential_phone_text = residue_text
-
     if addr_match:
         start_idx = addr_match.start()
         after_addr_start = residue_text[start_idx:]
@@ -238,13 +242,12 @@ def parse_ocr_residue(text):
             addr_end_idx = split_match.start()
             clean_addr = after_addr_start[:addr_end_idx].strip()
             data["住所"] = re.sub(r'[\s-]*$', '', clean_addr)
-            potential_phone_text = after_addr_start[addr_end_idx:]
             residue_text = residue_text[:start_idx] + after_addr_start[addr_end_idx:]
         else:
             data["住所"] = after_addr_start.strip()
             residue_text = residue_text[:start_idx]
 
-    norm_phone_text = normalize_num(potential_phone_text)
+    norm_phone_text = normalize_num(residue_text)
     p_matches = re.findall(r'(0\d[\d\s-]{8,}\d)', norm_phone_text)
     valid_phone = ""
     for p in p_matches:
@@ -255,54 +258,73 @@ def parse_ocr_residue(text):
                  break
     if valid_phone:
         data["電話番号"] = valid_phone
-        if data["住所"] and valid_phone in str(data["住所"]):
-             data["住所"] = data["住所"].replace(valid_phone, "").strip()
-        if valid_phone in residue_text:
-            residue_text = residue_text.replace(valid_phone, " ")
+        if data["住所"]: data["住所"] = data["住所"].replace(valid_phone, "").strip()
 
     tokens = [t for t in residue_text.split() if t.strip()]
     final_tokens = []
     for t in tokens:
         if re.match(r'^\d{1,3}$', t):
-            if not data["年齢"]:
-                data["年齢"] = t
+            if not data["年齢"]: data["年齢"] = t
             continue
-        if len(t) == 1 and not t.isalnum():
-            continue
+        if len(t) == 1 and not t.isalnum(): continue
         final_tokens.append(t)
-        
     if len(final_tokens) > 0:
-        name_val = final_tokens[0]
+        data["氏名"] = final_tokens[0]
         if len(final_tokens) > 1:
-            second = final_tokens[1]
-            job_keywords = ["会社", "代表", "役員", "社員", "教員", "公務員", "医師", "弁護士", "自営", "フリー", "主婦", "学生", "無職", "CEO", "Manager", "Director"]
-            if any(k in second for k in job_keywords):
-                data["職業"] = second
-            else:
-                name_val += " " + second
-                if len(final_tokens) > 2:
-                    data["職業"] = final_tokens[2]
-        data["氏名"] = name_val
+            data["氏名"] += " " + final_tokens[1]
+            if len(final_tokens) > 2: data["職業"] = final_tokens[2]
 
     return data
 
 def validate_document_type(text):
-    keywords = [
-        "氏名", "名前", "Name", "Guest",
-        "住所", "Address", "住 所",
-        "電話", "Tel", "Phone", "Mobile",
-        "チェックイン", "Check-in",
-        "チェックアウト", "Check-out",
-        "メール", "Email", "E-mail",
-        "宿泊", "Stay", "泊",
-        "署名", "Signature", "Sign",
-        "Age", "年齢"
-    ]
+    keywords = ["氏名", "名前", "Name", "住所", "Address", "電話", "Tel", "Check-in", "Email"]
     count = 0
     for kw in keywords:
-        if kw in text:
-            count += 1
+        if kw in text: count += 1
     return count >= 2
+
+def show_custom_success_animation():
+    image_path = "assets/nanji_v2.png"
+    if not os.path.exists(image_path):
+        # フォールバック（v2が無い場合は古いものを探すなど、念のため）
+        image_path = "assets/nanji_transparent.png"
+    
+    if os.path.exists(image_path):
+        with open(image_path, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode()
+            
+        # 画像データをCSS内に1回だけ定義して軽量化
+        st.markdown(f"""
+        <style>
+        .nanji-floater {{
+            position: absolute;
+            bottom: -150px;
+            background-image: url("data:image/png;base64,{encoded}");
+            background-size: contain;
+            background-repeat: no-repeat;
+            opacity: 0;
+            animation-name: floatUp;
+            animation-timing-function: ease-in-out; 
+            animation-fill-mode: forwards;
+        }}
+        </style>
+        """, unsafe_allow_html=True)
+        
+        # HTML生成（インデントによるコードブロック化を防ぐため1行で結合）
+        particles = []
+        for i in range(25):
+            left = random.randint(2, 98)
+            size = random.randint(60, 140)
+            duration = random.uniform(4.0, 8.0)
+            delay = random.uniform(0.0, 3.0)
+            # 各要素はCSSクラスを参照する空のdivにする (軽量化)
+            p = f'<div class="nanji-floater" style="left:{left}%; width:{size}px; height:{size}px; animation-duration:{duration}s; animation-delay:{delay}s;"></div>'
+            particles.append(p)
+            
+        html_content = f'<div class="floating-container">{"".join(particles)}</div>'
+        st.markdown(html_content, unsafe_allow_html=True)
+    else:
+        st.balloons()
 
 def main():
     local_css()
@@ -341,7 +363,6 @@ def main():
         st.session_state.pop('camera_image', None)
         st.rerun()
 
-    # シングルボタン構成
     uploaded_image = st.file_uploader(
         "予約カードを撮影または選択", 
         type=['png', 'jpg', 'jpeg'], 
@@ -382,7 +403,6 @@ def main():
                     if full_text:
                         if not validate_document_type(full_text):
                             st.warning("⚠️ 【警告】 読取エラーの可能性があります。予約カードではない、またはレイアウトが大きく異なる書類のようです。")
-                            
                         parsed = parse_ocr_residue(full_text)
                         st.session_state['ocr_result'] = parsed
                         st.session_state['raw_text'] = full_text
@@ -399,17 +419,14 @@ def main():
             data = st.session_state['ocr_result']
             
             with st.form("verify_form"):
-                c1, c2 = st.columns(2)
-                with c1:
-                    name = st.text_input("氏名 (A列)", value=data.get("氏名"))
-                    age = st.text_input("年齢 (B列)", value=data.get("年齢"))
-                    job = st.text_input("ご職業 (C列)", value=data.get("職業"))
-                    phone = st.text_input("電話番号 (E列)", value=data.get("電話番号"))
-                with c2:
-                    checkin = st.text_input("チェックイン日 (G列)", value=data.get("チェックイン日"))
-                    checkout = st.text_input("チェックアウト日 (H列)", value=data.get("チェックアウト日"))
-                    email = st.text_input("メールアドレス (F列)", value=data.get("メールアドレス"))
-                
+                cols = st.columns(2)
+                name = cols[0].text_input("氏名 (A列)", value=data.get("氏名"))
+                age = cols[0].text_input("年齢 (B列)", value=data.get("年齢"))
+                job = cols[0].text_input("ご職業 (C列)", value=data.get("職業"))
+                phone = cols[0].text_input("電話番号 (E列)", value=data.get("電話番号"))
+                checkin = cols[1].text_input("チェックイン日 (G列)", value=data.get("チェックイン日"))
+                checkout = cols[1].text_input("チェックアウト日 (H列)", value=data.get("チェックアウト日"))
+                email = cols[1].text_input("メールアドレス (F列)", value=data.get("メールアドレス"))
                 address = st.text_area("住所 (D列)", value=data.get("住所"), height=100)
                 
                 with st.expander("OCR生データを表示"):
@@ -421,34 +438,22 @@ def main():
                     try:
                         gc = gspread.authorize(creds)
                         sh = gc.open_by_url(SPREADSHEET_URL)
-                        
-                        # 1. メインシートへの転記
                         ws = sh.get_worksheet(0)
                         row = [name, age, job, address, phone, email, checkin, checkout]
                         ws.append_row(row)
-                        
-                        # 2. 生データのバックアップ (OCR_LOGシート)
                         try:
                             log_ws = sh.worksheet('OCR_LOG')
                         except:
                             log_ws = sh.add_worksheet(title='OCR_LOG', rows=1000, cols=50)
                             header = ['タイムスタンプ'] + [f'Line {i+1}' for i in range(49)]
                             log_ws.append_row(header)
-                            
                         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        
-                        # OCR生テキストを行ごとに分割してB列以降に展開
-                        raw_text_full = st.session_state.get('raw_text', '')
-                        raw_lines = [line.strip() for line in raw_text_full.splitlines() if line.strip()]
-                        
+                        raw_lines = [l.strip() for l in st.session_state.get('raw_text','').splitlines() if l.strip()]
                         log_row = [timestamp] + raw_lines
+                        log_ws.update(range_name=f'A{len(log_ws.col_values(1))+1}', values=[log_row])
                         
-                        # updateで確実書き込み
-                        next_row = len(log_ws.col_values(1)) + 1
-                        log_ws.update(range_name=f'A{next_row}', values=[log_row])
-                        
+                        show_custom_success_animation()
                         st.success("✅ 転記完了！（生データログも保存しました）")
-                        st.balloons()
                     except Exception as e:
                         st.error(f"書込エラー: {e}")
 
