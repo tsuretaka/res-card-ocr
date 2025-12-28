@@ -52,8 +52,9 @@ def local_css():
         gap: 10px; 
     }
 
+    /* 案内テキストの更新 */
     [data-testid="stFileUploader"] section > div > div::after {
-        content: "ここに画像をドラッグ＆ドロップ";
+        content: "ここをタップしてカメラ起動または画像選択";
         display: block;
         order: -1; 
         color: #555;
@@ -64,15 +65,15 @@ def local_css():
     
     [data-testid="stFileUploader"] button {
         color: transparent !important;
-        min-width: 140px; 
-        min-height: 40px;
+        min-width: 200px; /* ボタン幅を少し広げる */
+        min-height: 50px; /* 高さも広げる */
         position: relative !important;
         border: 1px solid rgba(0,0,0,0.1); 
         border-radius: 8px;
     }
 
     [data-testid="stFileUploader"] button::before {
-        content: "ファイルを選択";
+        content: "📸 カメラ / 📁 アルバム";
         position: absolute;
         width: 100%;
         height: 100%;
@@ -82,7 +83,7 @@ def local_css():
         align-items: center;
         justify-content: center;
         color: #333 !important; 
-        font-size: 1rem;
+        font-size: 1.1rem;
         font-weight: bold;
         pointer-events: none; 
     }
@@ -116,11 +117,6 @@ def local_css():
         }
         [data-testid="stSidebar"] {
             width: 100% !important;
-        }
-        button[data-baseweb="tab"] {
-            font-size: 14px !important;
-            padding: 10px !important;
-            flex: 1; 
         }
     }
     
@@ -355,28 +351,20 @@ def main():
         st.session_state.pop('camera_image', None)
         st.rerun()
 
-    
-    tab1, tab2 = st.tabs(["📁 アルバムから選択", "📷 カメラで撮影"])
+    # タブを廃止し、アップローダーを1つに統合 (スマホネイティブカメラ起動用)
+    uploaded_image = st.file_uploader(
+        "予約カードを撮影または選択", 
+        type=['png', 'jpg', 'jpeg'], 
+        key=f"uploader_{st.session_state['uploader_key']}",
+        label_visibility="collapsed"
+    )
     
     image_content = None
     final_image = None 
 
-    with tab1:
-        uploaded_image = st.file_uploader(
-            "画像ファイル", 
-            type=['png', 'jpg', 'jpeg'], 
-            key=f"uploader_{st.session_state['uploader_key']}",
-            label_visibility="collapsed"
-        )
-        if uploaded_image:
-            image_content = uploaded_image.getvalue()
-            final_image = Image.open(uploaded_image)
-
-    with tab2:
-        camera_shot = st.camera_input("カメラで撮影", label_visibility="collapsed")
-        if camera_shot:
-            image_content = camera_shot.getvalue()
-            final_image = Image.open(camera_shot)
+    if uploaded_image:
+        image_content = uploaded_image.getvalue()
+        final_image = Image.open(uploaded_image)
 
     col1, col2 = st.columns([1, 1.2]) 
     
@@ -412,7 +400,7 @@ def main():
                     else:
                         st.error("読み取り失敗")
         else:
-            st.info("👆 上のタブから画像を選択または撮影してください")
+            st.info("👆 上のボタンから「写真を撮る」または「ライブラリから選択」してください")
 
     with col2:
         if 'ocr_result' in st.session_state:
@@ -465,7 +453,7 @@ def main():
                         
                         log_row = [timestamp] + raw_lines
                         
-                        # A列の最終行の次へ確実にupdateする(1回のみ)
+                        # append_rowなどは使わず、A列の最終行の次へ確実にupdateする
                         next_row = len(log_ws.col_values(1)) + 1
                         log_ws.update(range_name=f'A{next_row}', values=[log_row])
                         
