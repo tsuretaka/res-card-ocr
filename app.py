@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 from datetime import datetime
 
-# FORCE DEPLOY v2.0 - Tabs Removed (Confirm Update)
+# FORCE DEPLOY v2.1 - Tabs Removed (Retry Build)
 
 st.set_page_config(
     page_title="予約カードOCRシステム",
