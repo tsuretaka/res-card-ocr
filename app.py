@@ -12,6 +12,8 @@ import cv2
 import numpy as np
 from datetime import datetime
 
+# FORCE DEPLOY v2.0 - Tabs Removed (Confirm Update)
+
 st.set_page_config(
     page_title="予約カードOCRシステム",
     layout="wide",
