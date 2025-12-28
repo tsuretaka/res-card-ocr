@@ -52,7 +52,6 @@ def local_css():
         gap: 10px; 
     }
 
-    /* 案内テキストの更新 */
     [data-testid="stFileUploader"] section > div > div::after {
         content: "ここをタップしてカメラ起動または画像選択";
         display: block;
@@ -65,8 +64,8 @@ def local_css():
     
     [data-testid="stFileUploader"] button {
         color: transparent !important;
-        min-width: 200px; /* ボタン幅を少し広げる */
-        min-height: 50px; /* 高さも広げる */
+        min-width: 200px; 
+        min-height: 50px; 
         position: relative !important;
         border: 1px solid rgba(0,0,0,0.1); 
         border-radius: 8px;
@@ -137,18 +136,12 @@ SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1McrtrFeMCufGrzVJgaKFG
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/cloud-vision"]
 
 def load_credentials(source):
-    """
-    ファイルパス、UploadedFile、または辞書(st.secrets)から認証情報を読み込む
-    """
     try:
         if isinstance(source, str):
-            # ファイルパスの場合
             creds = Credentials.from_service_account_file(source, scopes=SCOPES)
         elif isinstance(source, dict):
-             # 辞書(st.secrets)の場合
             creds = Credentials.from_service_account_info(source, scopes=SCOPES)
         else:
-             # UploadedFileの場合
             creds_dict = json.load(source)
             creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
         return creds
@@ -319,22 +312,17 @@ def main():
     creds = None
     SERVICE_ACCOUNT_FILE = "service_account.json"
     
-    # 1. ローカルファイルの確認
     if os.path.exists(SERVICE_ACCOUNT_FILE):
         creds = load_credentials(SERVICE_ACCOUNT_FILE)
         st.sidebar.success("🔑 認証キー読込済み (Local)")
-    
-    # 2. Streamlit Secretsの確認 (Cloudデプロイ用)
     elif 'gcp_service_account' in st.secrets:
         try:
-            # st.secretsはAtribDictのようなものなので、dictに変換して渡す
             creds_dict = dict(st.secrets['gcp_service_account'])
             creds = load_credentials(creds_dict)
             st.sidebar.success("🔑 認証キー読込済み (Secrets)")
         except Exception as e:
             st.sidebar.error(f"Secrets読込エラー: {e}")
 
-    # 3. 手動アップロード (フォールバック)
     if not creds:
         st.sidebar.header("設定")
         creds_file = st.sidebar.file_uploader("サービスアカウントキー (JSON)", type="json")
@@ -351,7 +339,7 @@ def main():
         st.session_state.pop('camera_image', None)
         st.rerun()
 
-    # タブを廃止し、アップローダーを1つに統合 (スマホネイティブカメラ起動用)
+    # シングルボタン構成
     uploaded_image = st.file_uploader(
         "予約カードを撮影または選択", 
         type=['png', 'jpg', 'jpeg'], 
@@ -453,7 +441,7 @@ def main():
                         
                         log_row = [timestamp] + raw_lines
                         
-                        # append_rowなどは使わず、A列の最終行の次へ確実にupdateする
+                        # updateで確実書き込み
                         next_row = len(log_ws.col_values(1)) + 1
                         log_ws.update(range_name=f'A{next_row}', values=[log_row])
                         
