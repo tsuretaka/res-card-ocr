@@ -14,7 +14,7 @@ from datetime import datetime
 import base64
 import random
 
-# FORCE DEPLOY v2.4 - Animation Rendering Fix
+# FORCE DEPLOY v3.1 - Parsing Logic: Prioritize Below Header
 
 st.set_page_config(
     page_title="予約カードOCRシステム",
@@ -123,7 +123,6 @@ def local_css():
         }
     }
     
-    /* アニメーション定義 */
     @keyframes floatUp {
         0% { bottom: -150px; transform: translateX(0) rotate(0deg); opacity: 0; }
         10% { opacity: 1; }
@@ -198,25 +197,21 @@ def parse_ocr_residue(text):
         "氏名": "", "年齢": "", "職業": "", "住所": "",
         "電話番号": "", "メールアドレス": "", "チェックイン日": "", "チェックアウト日": ""
     }
-    full_text = text.replace('\n', ' ').replace('　', ' ')
-    headers = ["氏名", "名前", "Name", "Guest Name", "年齢", "Age", "ご職業", "職業", "Occupation", "Job", "住所", "Address", "住 所", "電話番号", "電話", "Tel", "Phone", "Mobile", "Cell", "メールアドレス", "メール", "Email", "E-mail", "Mail", "チェックイン日", "チェックイン", "Check-in", "チェックアウト日", "チェックアウト", "Check-out", "お客様記入欄", "ホテル使用欄", "区分", "金額", "小計", "合計"]
-    residue_text = full_text
-    for h in headers:
-        residue_text = residue_text.replace(h, " ")
-
+    
+    full_text = text
+    
+    # 1. メールアドレス (Global search)
     email_match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', full_text)
     if email_match:
         data["メールアドレス"] = email_match.group(0)
-        residue_text = residue_text.replace(data["メールアドレス"], " ")
-
-    date_matches = re.findall(r'(\d{4})[./-](\d{1,2})[./-](\d{1,2})', full_text)
+    
+    # 2. 日付 (Global search)
+    date_matches = re.findall(r'(\d{4})[\./\-](\d{1,2})[\./\-](\d{1,2})', full_text)
     found_dates = []
     for d in date_matches:
         d_str = f"{d[0]}/{d[1]}/{d[2]}"
         found_dates.append(d_str)
-        pat = f"{d[0]}[./-]{d[1]}[./-]{d[2]}"
-        residue_text = re.sub(pat, " ", residue_text)
-
+    
     if len(found_dates) >= 2:
         found_dates.sort()
         data["チェックイン日"] = found_dates[0]
@@ -224,55 +219,103 @@ def parse_ocr_residue(text):
     elif len(found_dates) == 1:
         data["チェックイン日"] = found_dates[0]
 
-    def normalize_num(s):
-        trans = str.maketrans('０１２３４５６７８９', '0123456789')
-        s = s.translate(trans)
-        s = s.replace('O', '0').replace('o', '0').replace('l', '1').replace('I', '1')
-        return s
-
-    pref_pattern = r'(北海道|青森県|岩手県|宮城県|秋田県|山形県|福島県|茨城県|栃木県|群馬県|埼玉県|千葉県|東京都|神奈川県|新潟県|富山県|石川県|福井県|山梨県|長野県|岐阜県|静岡県|愛知県|三重県|滋賀県|京都府|大阪府|兵庫県|奈良県|和歌山県|鳥取県|島根県|岡山県|広島県|山口県|徳島県|香川県|愛媛県|高知県|福岡県|佐賀県|長崎県|熊本県|大分県|宮崎県|鹿児島県|沖縄県)'
-    addr_match = re.search(pref_pattern, residue_text)
-    if addr_match:
-        start_idx = addr_match.start()
-        after_addr_start = residue_text[start_idx:]
-        split_pattern = r'(0[789]0|Tel|Phone|Mobile)'
-        split_match = re.search(split_pattern, after_addr_start, re.IGNORECASE)
-        addr_end_idx = len(after_addr_start)
-        if split_match:
-            addr_end_idx = split_match.start()
-            clean_addr = after_addr_start[:addr_end_idx].strip()
-            data["住所"] = re.sub(r'[\s-]*$', '', clean_addr)
-            residue_text = residue_text[:start_idx] + after_addr_start[addr_end_idx:]
-        else:
-            data["住所"] = after_addr_start.strip()
-            residue_text = residue_text[:start_idx]
-
-    norm_phone_text = normalize_num(residue_text)
-    p_matches = re.findall(r'(0\d[\d\s-]{8,}\d)', norm_phone_text)
+    # 3. 電話番号 (Global search)
+    trans = str.maketrans('０１２３４５６７８９', '0123456789')
+    norm_text = full_text.translate(trans)
+    
+    phone_pattern = r'(0\d{1,4}[\s-]?\d{1,4}[\s-]?\d{3,4})'
+    p_matches = re.findall(phone_pattern, norm_text)
+    
     valid_phone = ""
     for p in p_matches:
         digits = re.sub(r'\D', '', p)
         if 10 <= len(digits) <= 11 and digits.startswith('0'):
-             valid_phone = p
-             if digits.startswith(('090', '080', '070')):
-                 break
+            if digits.startswith(('090', '080', '070', '03', '06', '092', '098')): 
+                valid_phone = p
+                break
+            elif len(digits) == 10 and digits.startswith('0'):
+                 valid_phone = p
+    
     if valid_phone:
         data["電話番号"] = valid_phone
-        if data["住所"]: data["住所"] = data["住所"].replace(valid_phone, "").strip()
 
-    tokens = [t for t in residue_text.split() if t.strip()]
-    final_tokens = []
-    for t in tokens:
-        if re.match(r'^\d{1,3}$', t):
-            if not data["年齢"]: data["年齢"] = t
+    # 4. 行ごとの解析
+    lines = [line.strip() for line in full_text.split('\n') if line.strip()]
+    pref_pattern = r'(北海道|青森県|岩手県|宮城県|秋田県|山形県|福島県|茨城県|栃木県|群馬県|埼玉県|千葉県|東京都|神奈川県|新潟県|富山県|石川県|福井県|山梨県|長野県|岐阜県|静岡県|愛知県|三重県|滋賀県|京都府|大阪府|兵庫県|奈良県|和歌山県|鳥取県|島根県|岡山県|広島県|山口県|徳島県|香川県|愛媛県|高知県|福岡県|佐賀県|長崎県|熊本県|大分県|宮崎県|鹿児島県|沖縄県)'
+    
+    # 次の行がこれらに当てはまる場合は値とみなさない（別のヘッダー）
+    header_pattern = r'(氏名|名前|Name|Guest|住所|Address|電話|Tel|Phone|Email|職業|Job|Occupation|Check|Date|No\.|宿泊|人数)'
+    
+    potential_names = []
+    
+    for i, line in enumerate(lines):
+        # 住所: 都道府県が入っている行は問答無用で住所とする（これが最強）
+        if re.search(pref_pattern, line):
+            clean_addr = line
+            # メールや電話が混ざっていたら消す
+            if data["メールアドレス"] in clean_addr: clean_addr = clean_addr.replace(data["メールアドレス"], "")
+            if valid_phone and valid_phone in clean_addr: clean_addr = clean_addr.replace(valid_phone, "")
+            
+            clean_addr = re.sub(r'(住所|Address|住\s*所)[:：\s]*', '', clean_addr, flags=re.IGNORECASE).strip()
+            # より長い情報を優先して保存
+            if len(clean_addr) > len(data["住所"]):
+                data["住所"] = clean_addr
             continue
-        if len(t) == 1 and not t.isalnum(): continue
-        final_tokens.append(t)
-    if len(final_tokens) > 0:
-        data["氏名"] = final_tokens[0]
-        if len(final_tokens) > 1:
-            data["氏名"] += " " + final_tokens[1]
-            if len(final_tokens) > 2: data["職業"] = final_tokens[2]
+
+        # 氏名: ヘッダーを見つけたら「直下の行」を最優先で取得
+        if re.search(r'(氏名|名前|Name|Guest)', line, re.IGNORECASE):
+            found_name_below = False
+            # 直下をチェック
+            if i + 1 < len(lines):
+                next_line = lines[i+1]
+                # 次の行が別のヘッダーっぽくなければ採用
+                if not re.search(header_pattern, next_line, re.IGNORECASE) and len(next_line) > 1:
+                    potential_names.append(next_line)
+                    found_name_below = True
+            
+            # 直下が取得できなかった（orヘッダーだった）場合のみ、右側を見る
+            if not found_name_below:
+                val = re.sub(r'(氏名|名前|Name|Guest\s*Name|Guest)[:：\s]*', '', line, flags=re.IGNORECASE).strip()
+                if val and len(val) > 1:
+                    potential_names.append(val)
+        
+        # 職業: 同様に「直下の行」を最優先
+        if re.search(r'(職業|Occupation|Job)', line, re.IGNORECASE):
+            found_job_below = False
+            if i + 1 < len(lines):
+                next_line = lines[i+1]
+                if not re.search(header_pattern, next_line, re.IGNORECASE) and len(next_line) > 1:
+                    data["職業"] = next_line
+                    found_job_below = True
+            
+            if not found_job_below:
+                val = re.sub(r'(職業|Occupation|Job)[:：\s]*', '', line, flags=re.IGNORECASE).strip()
+                if val:
+                    data["職業"] = val
+
+        # 年齢: 数字抽出なので、同じ行にあれば採用、なければ次の行から数字を探す
+        if re.search(r'(年齢|Age)', line, re.IGNORECASE):
+            val = re.sub(r'[^0-9]', '', line)
+            if val:
+                data["年齢"] = val
+            elif i + 1 < len(lines):
+                val_next = re.sub(r'[^0-9]', '', lines[i+1])
+                if val_next:
+                    data["年齢"] = val_next
+
+    # フォールバック: 名前が見つからない場合は、上の方の行を適当に拾う
+    if not data["氏名"] and potential_names:
+        data["氏名"] = potential_names[0]
+    elif not data["氏名"]:
+        for line in lines[:3]:
+            if re.search(r'(予約|Card|Registration|泊|No\.|Date)', line, re.IGNORECASE): continue
+            if data["メールアドレス"] in line: continue
+            if len(line) < 2: continue
+            data["氏名"] = line
+            break
+
+    if data["氏名"]:
+        data["氏名"] = data["氏名"].replace("様", "").strip()
 
     return data
 
@@ -286,14 +329,12 @@ def validate_document_type(text):
 def show_custom_success_animation():
     image_path = "assets/nanji_v2.png"
     if not os.path.exists(image_path):
-        # フォールバック（v2が無い場合は古いものを探すなど、念のため）
         image_path = "assets/nanji_transparent.png"
     
     if os.path.exists(image_path):
         with open(image_path, "rb") as f:
             encoded = base64.b64encode(f.read()).decode()
             
-        # 画像データをCSS内に1回だけ定義して軽量化
         st.markdown(f"""
         <style>
         .nanji-floater {{
@@ -310,14 +351,12 @@ def show_custom_success_animation():
         </style>
         """, unsafe_allow_html=True)
         
-        # HTML生成（インデントによるコードブロック化を防ぐため1行で結合）
         particles = []
         for i in range(25):
             left = random.randint(2, 98)
             size = random.randint(60, 140)
             duration = random.uniform(4.0, 8.0)
             delay = random.uniform(0.0, 3.0)
-            # 各要素はCSSクラスを参照する空のdivにする (軽量化)
             p = f'<div class="nanji-floater" style="left:{left}%; width:{size}px; height:{size}px; animation-duration:{duration}s; animation-delay:{delay}s;"></div>'
             particles.append(p)
             
