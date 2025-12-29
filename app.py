@@ -182,7 +182,10 @@ def perform_ocr(image_content, credentials):
     try:
         client = vision.ImageAnnotatorClient(credentials=credentials)
         image = vision.Image(content=image_content)
-        response = client.text_detection(image=image)
+        # 言語ヒントを追加: 日本語と英語を優先
+        image_context = vision.ImageContext(language_hints=["ja", "en"])
+        
+        response = client.text_detection(image=image, image_context=image_context)
         texts = response.text_annotations
         if response.error.message:
             st.error(f"OCR Error: {response.error.message}")
@@ -192,7 +195,27 @@ def perform_ocr(image_content, credentials):
         st.error(f"API Error: {e}")
         return None
 
+def correct_common_ocr_errors(text):
+    """
+    よくあるOCR誤読を修正する
+    - 記号の削除は最小限にし、似ている文字への置換を優先
+    """
+    # 1. 全角英数字を半角に統一
+    trans = str.maketrans('０１２３４５６７８９ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ', 
+                          '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz')
+    text = text.translate(trans)
+
+    # 2. 明らかなノイズの除去 (解読不能な記号など)
+    # ただし、住所で使われる「ー（長音）」や「-（ハイフン）」は残す
+    # 制御文字除去
+    text = "".join([c for c in text if c.isprintable()])
+
+    return text
+
 def parse_ocr_residue(text):
+    # ノイズ除去ではなく補正を行う
+    text = correct_common_ocr_errors(text)
+    
     data = {
         "氏名": "", "年齢": "", "職業": "", "住所": "",
         "電話番号": "", "メールアドレス": "", "チェックイン日": "", "チェックアウト日": ""
@@ -239,69 +262,95 @@ def parse_ocr_residue(text):
     if valid_phone:
         data["電話番号"] = valid_phone
 
-    # 4. 行ごとの解析
+    # 4. 行ごとの解析 (項目名の直下を値として取得する厳格なルール)
     lines = [line.strip() for line in full_text.split('\n') if line.strip()]
-    pref_pattern = r'(北海道|青森県|岩手県|宮城県|秋田県|山形県|福島県|茨城県|栃木県|群馬県|埼玉県|千葉県|東京都|神奈川県|新潟県|富山県|石川県|福井県|山梨県|長野県|岐阜県|静岡県|愛知県|三重県|滋賀県|京都府|大阪府|兵庫県|奈良県|和歌山県|鳥取県|島根県|岡山県|広島県|山口県|徳島県|香川県|愛媛県|高知県|福岡県|佐賀県|長崎県|熊本県|大分県|宮崎県|鹿児島県|沖縄県)'
     
     # 次の行がこれらに当てはまる場合は値とみなさない（別のヘッダー）
-    header_pattern = r'(氏名|名前|Name|Guest|住所|Address|電話|Tel|Phone|Email|職業|Job|Occupation|Check|Date|No\.|宿泊|人数)'
+    header_regex = r'(氏名|名前|Name|Guest|住所|Address|住\s*所|電話|Tel|Phone|Email|メール|職業|Job|Occupation|Check|Date|No\.|宿泊|人数|Age|年齢)'
     
     potential_names = []
     
     for i, line in enumerate(lines):
-        # 住所: 都道府県が入っている行は問答無用で住所とする（これが最強）
-        if re.search(pref_pattern, line):
-            clean_addr = line
-            # メールや電話が混ざっていたら消す
-            if data["メールアドレス"] in clean_addr: clean_addr = clean_addr.replace(data["メールアドレス"], "")
-            if valid_phone and valid_phone in clean_addr: clean_addr = clean_addr.replace(valid_phone, "")
-            
-            clean_addr = re.sub(r'(住所|Address|住\s*所)[:：\s]*', '', clean_addr, flags=re.IGNORECASE).strip()
-            # より長い情報を優先して保存
-            if len(clean_addr) > len(data["住所"]):
-                data["住所"] = clean_addr
-            continue
+        # 直下の行を取得するヘルパー
+        def get_next_line_value(current_index):
+            if current_index + 1 < len(lines):
+                next_val = lines[current_index+1]
+                # 次の行がヘッダーっぽくなければ採用
+                if not re.search(header_regex, next_val, re.IGNORECASE) and len(next_val) > 1:
+                    return next_val
+            return None
 
-        # 氏名: ヘッダーを見つけたら「直下の行」を最優先で取得
-        if re.search(r'(氏名|名前|Name|Guest)', line, re.IGNORECASE):
-            found_name_below = False
-            # 直下をチェック
-            if i + 1 < len(lines):
-                next_line = lines[i+1]
-                # 次の行が別のヘッダーっぽくなければ採用
-                if not re.search(header_pattern, next_line, re.IGNORECASE) and len(next_line) > 1:
-                    potential_names.append(next_line)
-                    found_name_below = True
+        # --- 住所 ---
+        if re.search(r'(住所|Address|住\s*所)', line, re.IGNORECASE):
+            val = get_next_line_value(i)
+            # 直下になければ、その行の右側を見る（例外対応）
+            if not val:
+                val = re.sub(r'(住所|Address|住\s*所)[:：\s]*', '', line, flags=re.IGNORECASE).strip()
             
-            # 直下が取得できなかった（orヘッダーだった）場合のみ、右側を見る
-            if not found_name_below:
-                val = re.sub(r'(氏名|名前|Name|Guest\s*Name|Guest)[:：\s]*', '', line, flags=re.IGNORECASE).strip()
-                if val and len(val) > 1:
-                    potential_names.append(val)
-        
-        # 職業: 同様に「直下の行」を最優先
-        if re.search(r'(職業|Occupation|Job)', line, re.IGNORECASE):
-            found_job_below = False
-            if i + 1 < len(lines):
-                next_line = lines[i+1]
-                if not re.search(header_pattern, next_line, re.IGNORECASE) and len(next_line) > 1:
-                    data["職業"] = next_line
-                    found_job_below = True
-            
-            if not found_job_below:
-                val = re.sub(r'(職業|Occupation|Job)[:：\s]*', '', line, flags=re.IGNORECASE).strip()
-                if val:
-                    data["職業"] = val
-
-        # 年齢: 数字抽出なので、同じ行にあれば採用、なければ次の行から数字を探す
-        if re.search(r'(年齢|Age)', line, re.IGNORECASE):
-            val = re.sub(r'[^0-9]', '', line)
             if val:
-                data["年齢"] = val
-            elif i + 1 < len(lines):
-                val_next = re.sub(r'[^0-9]', '', lines[i+1])
-                if val_next:
-                    data["年齢"] = val_next
+                # 誤って混入したメアドや電話を除去
+                if data["メールアドレス"] in val: val = val.replace(data["メールアドレス"], "")
+                if valid_phone and valid_phone in val: val = val.replace(valid_phone, "")
+                # 長い方を採用（更新）
+                if len(val) > len(data["住所"]):
+                    data["住所"] = val.strip()
+
+        # --- 氏名 ---
+        elif re.search(r'(氏名|名前|Name|Guest)', line, re.IGNORECASE):
+            val = get_next_line_value(i)
+            if val:
+                potential_names.append(val)
+            else:
+                # 直下になければ右側
+                val = re.sub(r'(氏名|名前|Name|Guest\s*Name|Guest)[:：\s]*', '', line, flags=re.IGNORECASE).strip()
+                if len(val) > 1: potential_names.append(val)
+        
+        # --- 職業 ---
+        elif re.search(r'(職業|Occupation|Job|ご職業)', line, re.IGNORECASE):
+            val = get_next_line_value(i)
+            if not val:
+                val = re.sub(r'(職業|Occupation|Job|ご職業)[:：\s]*', '', line, flags=re.IGNORECASE).strip()
+            if val: data["職業"] = val
+
+        # --- 年齢 ---
+        elif re.search(r'(年齢|Age)', line, re.IGNORECASE):
+            val = get_next_line_value(i)
+            # 数字が含まれているか確認
+            if val and re.search(r'[0-9]', val):
+                nums = re.sub(r'[^0-9]', '', val)
+                if nums: data["年齢"] = nums
+            else:
+                # 直下になければ右側
+                nums = re.sub(r'[^0-9]', '', line)
+                if nums: data["年齢"] = nums
+        
+        # --- 電話番号 (行指定で見つかった場合の上書き) ---
+        elif re.search(r'(電話|Tel|Phone)', line, re.IGNORECASE):
+            val = get_next_line_value(i)
+            if val:
+                # 数字抽出して検証
+                nums = re.sub(r'[^0-9]', '', val)
+                if len(nums) >= 10: data["電話番号"] = val # フォーマット未加工で入れる（後で整形されるかも）
+        
+        # --- メールアドレス (行指定) ---
+        elif re.search(r'(メール|Email|E-mail)', line, re.IGNORECASE):
+            val = get_next_line_value(i)
+            if val and "@" in val:
+                data["メールアドレス"] = val
+
+    # 住所の補正: 都道府県が含まれる行があれば、それを最強の住所とする（ヘッダー行関係なく）
+    # これはOCRが行を結合してしまったり、ヘッダーが無い場合への保険
+    pref_pattern = r'(北海道|青森県|岩手県|宮城県|秋田県|山形県|福島県|茨城県|栃木県|群馬県|埼玉県|千葉県|東京都|神奈川県|新潟県|富山県|石川県|福井県|山梨県|長野県|岐阜県|静岡県|愛知県|三重県|滋賀県|京都府|大阪府|兵庫県|奈良県|和歌山県|鳥取県|島根県|岡山県|広島県|山口県|徳島県|香川県|愛媛県|高知県|福岡県|佐賀県|長崎県|熊本県|大分県|宮崎県|鹿児島県|沖縄県)'
+    for line in lines:
+        if re.search(pref_pattern, line):
+            # ヘッダー文字を除去
+            clean = re.sub(r'(住所|Address|住\s*所)[:：\s]*', '', line, flags=re.IGNORECASE).strip()
+             # メールや電話を除去
+            if data["メールアドレス"] in clean: clean = clean.replace(data["メールアドレス"], "")
+            if valid_phone and valid_phone in clean: clean = clean.replace(valid_phone, "")
+            
+            if len(clean) > len(data["住所"]):
+                data["住所"] = clean
 
     # フォールバック: 名前が見つからない場合は、上の方の行を適当に拾う
     if not data["氏名"] and potential_names:
