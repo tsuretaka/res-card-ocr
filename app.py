@@ -334,11 +334,54 @@ def main():
 
                     st.markdown("---")
                     if st.form_submit_button("✅ 承認してスプレッドシートへ転記"):
+                        st.info("🔄 書き込み処理を開始します...")
                         try:
                             gc = gspread.authorize(creds)
                             sh = gc.open_by_url(SPREADSHEET_URL)
-                            ws = sh.get_worksheet(0)
-                            ws.append_row([name, age, job, address, phone, email, checkin, checkout])
+                            
+                            # シート名を指定して取得（インデックス0だとずれる可能性があるため）
+                            target_sheet_name = 'シート1' 
+                            try:
+                                ws = sh.worksheet(target_sheet_name)
+                            except gspread.WorksheetNotFound:
+                                ws = sh.get_worksheet(0)
+                                st.warning(f"⚠️ '{target_sheet_name}' が見つかりませんでした。代わりに一番左のシート '{ws.title}' に書き込みます。")
+                            
+                            st.write(f"書き込み先シート名: {ws.title}")
+                            
+                            write_data = [name, age, job, address, phone, email, checkin, checkout]
+                            st.write(f"書き込みデータを確認: {write_data}")
+                            
+                            # append_rowだと列がずれる場合があるため、明示的に書き込む
+                            # 「上から順に見て、空いている最初の行」を探すロジックに変更
+                            col_a = ws.col_values(1)
+                            
+                            target_row_index = len(col_a) + 1 # デフォルトは末尾
+                            
+                            # ヘッダー(1行目)があるので、2行目(index 1)からチェック
+                            # 途中に空きがあればそこ埋める
+                            for i in range(1, len(col_a)):
+                                if not col_a[i].strip():
+                                    target_row_index = i + 1
+                                    break
+                            
+                            # もしcol_aの長さよりデータの行数がスプレッドシート上で多い場合（途中に空白セルがある場合）
+                            # col_valuesは「値のある最後の行」までしか返さないことがあるため、
+                            # 念のため get_all_values() でチェックして、本当に空いているか確認するのが確実だが、
+                            # 簡易的に「col_valuesで見つけた空き」または「末尾」に書く。
+                            # 今回のケース（2-12が空白）なら、col_valuesは1行目までしか返ってこないか、
+                            # あるいは13行目まで返ってきて2行目が空文字になっているはず。
+                            
+                            # col_values が ['氏名', '', '', ..., '山田'] のようになっている場合 -> index 1が見つかる
+                            # col_values が ['氏名'] だけの場合 -> 2行目に書く
+                            
+                            next_row = target_row_index
+                            
+                            # A列のnext_row行目から書き込み
+                            ws.update(range_name=f'A{next_row}', values=[write_data])
+                            
+                            st.success(f"✅ シート '{ws.title}' の {next_row} 行目に追記しました")
+                            
                             try:
                                 log_ws = sh.worksheet('OCR_LOG')
                             except:
@@ -351,7 +394,10 @@ def main():
                             
                             show_custom_success_animation()
                             st.success("✅ 転記完了！（生データログも保存しました）")
-                        except Exception as e: st.error(f"書込エラー: {e}")
+                        except Exception as e: 
+                            st.error(f"❌ 書き込み中に重大なエラーが発生しました: {type(e).__name__}: {str(e)}")
+                            import traceback
+                            st.code(traceback.format_exc())
 
     st.markdown('<div class="footer">Developed by Center of Okinawa Local Tourism</div>', unsafe_allow_html=True)
 
