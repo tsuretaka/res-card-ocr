@@ -260,14 +260,23 @@ def main():
     if os.path.exists("service_account.json"):
         creds = load_credentials("service_account.json")
         st.sidebar.success("🔑 認証キー読込済み (Local)")
+    elif os.environ.get("GCP_SERVICE_ACCOUNT_JSON"):
+        try:
+            import json
+            creds_dict = json.loads(os.environ.get("GCP_SERVICE_ACCOUNT_JSON"))
+            creds = load_credentials(creds_dict)
+            st.sidebar.success("🔑 認証キー読込済み (Render Env)")
+        except Exception as e:
+            st.sidebar.error(f"Render Env Error: {e}")
     elif 'gcp_service_account' in st.secrets:
         try:
             creds = load_credentials(dict(st.secrets['gcp_service_account']))
             st.sidebar.success("🔑 認証キー読込済み (Secrets)")
-        except: st.sidebar.error("Secrets Error")
+        except:
+            st.sidebar.error("Secrets Error")
 
     if not creds:
-        st.warning("⚠️ 認証キーが見つかりません。")
+        st.warning("⚠️ 認証キーが見つかりません。環境変数またはSecretsを設定してください。")
         return
 
     if st.sidebar.button("🔄 リセット / 次の画像を読み込む", type="primary"):
