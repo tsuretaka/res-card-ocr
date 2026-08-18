@@ -71,7 +71,7 @@ def load_credentials(source):
         st.error(f"認証エラー: {e}")
         return None
 
-def get_aligned_card_and_crops(image_bytes):
+def get_aligned_card_and_crops(image_bytes, use_enhance=True):
     """
     画像を読み込み、カードの輪郭を検出して正面の 1000x360 画像に補正。
     その後、9つの入力セルエリアを切り出して返却する。
@@ -149,12 +149,18 @@ def get_aligned_card_and_crops(image_bytes):
     for name, (ymin, xmin, ymax, xmax) in crop_definitions.items():
         crop_img = aligned[ymin:ymax, xmin:xmax]
         
-        # 切り出したセルごとにコントラスト強調をかけて視認性を上げる
+        # 切り出したセルごとにグレースケール化
         gray_crop = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-        enhanced_crop = clahe.apply(gray_crop)
         
-        _, encoded = cv2.imencode('.jpg', enhanced_crop)
+        if use_enhance:
+            # 以前の preprocess_image と同等の高精度ノイズ除去(Denoise) ＋ コントラスト強調(CLAHE)
+            denoised = cv2.fastNlMeansDenoising(gray_crop, h=10)
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+            processed = clahe.apply(denoised)
+        else:
+            processed = gray_crop
+        
+        _, encoded = cv2.imencode('.jpg', processed)
         crops[name] = encoded.tobytes()
 
     return aligned, crops
@@ -268,6 +274,8 @@ def main():
         
         with col1:
             st.subheader("1. 予約カード読込")
+            # チェックボックスを復活
+            use_enhance = st.checkbox("手書き文字補正を行う (推奨)", value=True, help="文字を濃くし、影を除去して読み取りやすくします。")
             st.image(final_image, caption='読込画像', use_container_width=True)
             
             if st.button("🔍 OCR解析実行", type="primary"):
@@ -276,8 +284,8 @@ def main():
                     final_image.save(img_byte_arr, format=final_image.format or 'JPEG')
                     target_bytes = img_byte_arr.getvalue()
                     
-                    # 1. 傾き補正およびセル切り出し
-                    aligned_img, crops_dict = get_aligned_card_and_crops(target_bytes)
+                    # 1. 傾き補正およびセル切り出し (use_enhance引数を追加)
+                    aligned_img, crops_dict = get_aligned_card_and_crops(target_bytes, use_enhance=use_enhance)
                     
                     # 補正後の画像をUIに表示（確認用）
                     with st.expander("補正後の画像を確認", expanded=True):
