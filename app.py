@@ -302,14 +302,14 @@ def main():
                 with st.form("verify_form"):
                     cols = st.columns(2)
                     name = cols[0].text_input("氏名 (A列)", value=data.get("氏名"))
-                    furigana = cols[0].text_input("フリガナ (非転記)", value=data.get("フリガナ"))
-                    age = cols[0].text_input("年齢 (B列)", value=data.get("年齢"))
-                    job = cols[0].text_input("ご職業 (C列)", value=data.get("職業"))
-                    phone = cols[0].text_input("電話番号 (E列)", value=data.get("電話番号"))
-                    checkin = cols[1].text_input("チェックイン日 (G列)", value=data.get("チェックイン日"))
-                    checkout = cols[1].text_input("チェックアウト日 (H列)", value=data.get("チェックアウト日"))
-                    email = cols[1].text_input("メールアドレス (F列)", value=data.get("メールアドレス"))
-                    address = st.text_area("住所 (D列)", value=data.get("住所"), height=100)
+                    furigana = cols[0].text_input("フリガナ (B列)", value=data.get("フリガナ"))
+                    age = cols[0].text_input("年齢 (C列)", value=data.get("年齢"))
+                    job = cols[0].text_input("ご職業 (D列)", value=data.get("職業"))
+                    phone = cols[0].text_input("電話番号 (F列)", value=data.get("電話番号"))
+                    checkin = cols[1].text_input("チェックイン日 (H列)", value=data.get("チェックイン日"))
+                    checkout = cols[1].text_input("チェックアウト日 (I列)", value=data.get("チェックアウト日"))
+                    email = cols[1].text_input("メールアドレス (G列)", value=data.get("メールアドレス"))
+                    address = st.text_area("住所 (E列)", value=data.get("住所"), height=100)
                     
                     with st.expander("OCR生データを表示"):
                         st.text_area("解析前のテキスト", st.session_state.get('raw_text', ''), height=150)
@@ -330,7 +330,8 @@ def main():
                             
                             st.write(f"書き込み先シート名: {ws.title}")
                             
-                            write_data = [name, age, job, address, phone, email, checkin, checkout]
+                            # フリガナを含めた9項目の転記データ配列 (A〜I列)
+                            write_data = [name, furigana, age, job, address, phone, email, checkin, checkout]
                             st.write(f"書き込みデータを確認: {write_data}")
                             
                             # 空き行を探す
@@ -344,7 +345,7 @@ def main():
                             
                             next_row = target_row_index
                             
-                            # A列のnext_row行目から書き込み
+                            # A列のnext_row行目から書き込み (A〜I列へ一括update)
                             ws.update(range_name=f'A{next_row}', values=[write_data])
                             
                             st.success(f"✅ シート '{ws.title}' の {next_row} 行目に追記しました")
