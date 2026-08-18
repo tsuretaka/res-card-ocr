@@ -71,172 +71,147 @@ def load_credentials(source):
         st.error(f"認証エラー: {e}")
         return None
 
-def preprocess_image(image_bytes):
+def get_aligned_card_and_crops(image_bytes):
+    """
+    画像を読み込み、カードの輪郭を検出して正面の 1000x360 画像に補正。
+    その後、9つの入力セルエリアを切り出して返却する。
+    """
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    denoised = cv2.fastNlMeansDenoising(gray, h=10)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-    enhanced = clahe.apply(denoised)
-    _, encoded_img = cv2.imencode('.jpg', enhanced)
-    return encoded_img.tobytes(), enhanced
+    h_orig, w_orig = img.shape[:2]
 
-def perform_ocr_document(image_content, credentials):
+    # 1. 輪郭検出
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edged = cv2.Canny(blurred, 50, 150)
+    
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    dilated = cv2.dilate(edged, kernel, iterations=2)
+    contours, _ = cv2.findContours(dilated.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    card_contour = None
+    max_area = 0
+    
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < (w_orig * h_orig * 0.15):  # 面積が全体の15%未満は除外
+            continue
+        peri = cv2.arcLength(c, True)
+        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+        if len(approx) == 4:
+            if area > max_area:
+                card_contour = approx
+                max_area = area
+
+    target_w, target_h = 1000, 360
+    aligned = None
+
+    # 2. 射影変換
+    if card_contour is not None:
+        pts = card_contour.reshape(4, 2)
+        rect = np.zeros((4, 2), dtype="float32")
+        
+        s = pts.sum(axis=1)
+        rect[0] = pts[np.argmin(s)]  # 左上
+        rect[2] = pts[np.argmax(s)]  # 右下
+        
+        diff = np.diff(pts, axis=1)
+        rect[1] = pts[np.argmin(diff)] # 右上
+        rect[3] = pts[np.argmax(diff)] # 左下
+        
+        dst = np.array([
+            [0, 0],
+            [target_w - 1, 0],
+            [target_w - 1, target_h - 1],
+            [0, target_h - 1]
+        ], dtype="float32")
+        
+        M = cv2.getPerspectiveTransform(rect, dst)
+        aligned = cv2.warpPerspective(img, M, (target_w, target_h))
+    else:
+        aligned = cv2.resize(img, (target_w, target_h))
+
+    # 3. 9つの手書きセル枠の切り出し座標 (ymin, xmin, ymax, xmax)
+    # ※見出し文字を避けて切り出します
+    crop_definitions = {
+        "氏名": (47, 0, 94, 220),
+        "フリガナ": (47, 220, 94, 550),
+        "年齢": (47, 550, 94, 780),
+        "職業": (47, 780, 94, 1000),
+        "住所": (126, 0, 173, 1000),
+        "電話番号": (205, 0, 252, 330),
+        "メールアドレス": (205, 330, 252, 1000),
+        "チェックイン日": (288, 0, 335, 330),
+        "チェックアウト日": (288, 330, 335, 1000)
+    }
+
+    crops = {}
+    for name, (ymin, xmin, ymax, xmax) in crop_definitions.items():
+        crop_img = aligned[ymin:ymax, xmin:xmax]
+        
+        # 切り出したセルごとにコントラスト強調をかけて視認性を上げる
+        gray_crop = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        enhanced_crop = clahe.apply(gray_crop)
+        
+        _, encoded = cv2.imencode('.jpg', enhanced_crop)
+        crops[name] = encoded.tobytes()
+
+    return aligned, crops
+
+def perform_ocr_batch(crops_dict, credentials):
+    """
+    Google Vision API の batch_annotate_images を利用し、
+    9つの画像を一度のリクエストでOCR解析する。
+    """
     try:
         client = vision.ImageAnnotatorClient(credentials=credentials)
-        image = vision.Image(content=image_content)
-        # TEXT_DETECTIONに戻す（シンプルな行順序のみ必要）
-        image_context = vision.ImageContext(language_hints=["ja", "en"])
-        response = client.text_detection(image=image, image_context=image_context)
-        if response.error.message:
-            st.error(f"OCR Error: {response.error.message}")
-            return None
-        return response
+        requests = []
+        keys = list(crops_dict.keys())
+        
+        for key in keys:
+            image_content = crops_dict[key]
+            image = vision.Image(content=image_content)
+            request = vision.AnnotateImageRequest(
+                image=image,
+                features=[vision.Feature(type_=vision.Feature.Type.TEXT_DETECTION)],
+                image_context=vision.ImageContext(language_hints=["ja", "en"])
+            )
+            requests.append(request)
+            
+        response = client.batch_annotate_images(requests=requests)
+        
+        parsed_data = {
+            "氏名": "", "フリガナ": "", "年齢": "", "職業": "", "住所": "",
+            "電話番号": "", "メールアドレス": "", "チェックイン日": "", "チェックアウト日": ""
+        }
+        raw_texts = []
+        
+        for idx, res in enumerate(response.responses):
+            key = keys[idx]
+            if res.error.message:
+                print(f"Error on {key}: {res.error.message}")
+                continue
+                
+            text = ""
+            if res.text_annotations:
+                text = res.text_annotations[0].description.strip()
+            
+            # 日付セル（チェックイン・アウト）にプリプリントされている「年月日」を取り除くクリーンアップ
+            if "日" in key:
+                text = re.sub(r'[\s年月日の]+', '/', text).strip('/')
+            
+            # 全般的なクリーニング
+            text = re.sub(r'^[:：\s]+', '', text).strip()
+            
+            parsed_data[key] = text
+            raw_texts.append(f"【{key}】: {text}")
+            
+        return parsed_data, "\n".join(raw_texts)
+        
     except Exception as e:
-        st.error(f"API Error: {e}")
-        return None
-
-def extract_text_content(response):
-    if response and response.text_annotations:
-        return response.text_annotations[0].description
-    return ""
-
-def linear_text_parsing(text):
-    """
-    OCR生データ（改行区切りテキスト）を上から順番に解析し、
-    項目名とその下の値をマッピングする。
-    """
-    data = {
-        "氏名": "", "年齢": "", "職業": "", "住所": "",
-        "電話番号": "", "メールアドレス": "", "チェックイン日": "", "チェックアウト日": ""
-    }
-    
-    # 全行リスト（空行除去）
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
-    
-    # 項目判定用Regex
-    pat_header_map = {
-        "氏名": r'(氏名|名前|Name)',
-        "住所": r'(住所|Address|住\s*所)',
-        "電話番号": r'(電話|Tel|Phone)',
-        "メールアドレス": r'(メール|Email)',
-        "職業": r'(職業|Job|Occupation|ご職業)',
-        "年齢": r'(年齢|Age)',
-        "チェックイン日": r'(チェックイン|Check-in)',
-        "チェックアウト日": r'(チェックアウト|Check-out)'
-    }
-    
-    # 都道府県
-    pat_pref = r'(北海道|青森県|岩手県|宮城県|秋田県|山形県|福島県|茨城県|栃木県|群馬県|埼玉県|千葉県|東京都|神奈川県|新潟県|富山県|石川県|福井県|山梨県|長野県|岐阜県|静岡県|愛知県|三重県|滋賀県|京都府|大阪府|兵庫県|奈良県|和歌山県|鳥取県|島根県|岡山県|広島県|山口県|徳島県|香川県|愛媛県|高知県|福岡県|佐賀県|長崎県|熊本県|大分県|宮崎県|鹿児島県|沖縄県)'
-
-    # 処理済み行インデックス
-    used_indices = set()
-
-    # バリデーション関数定義
-    def is_valid_age(text): return re.search(r'\d', text) is not None
-    def is_valid_job(text): return not re.match(r'^\d+$', text.strip()) # 数字だけはNG
-    def is_valid_phone(text): return len(re.sub(r'\D', '', text)) >= 9
-    def is_valid_email(text): return '@' in text
-    def is_valid_date(text): return re.search(r'\d{4}', text) is not None
-
-    validators = {
-        "年齢": is_valid_age,
-        "職業": is_valid_job,
-        "電話番号": is_valid_phone,
-        "メールアドレス": is_valid_email,
-        "チェックイン日": is_valid_date,
-        "チェックアウト日": is_valid_date
-    }
-
-    # 1. ヘッダー探索ループ
-    for i, line in enumerate(lines):
-        if i in used_indices: continue
-        
-        # この行がどのヘッダーにマッチするか
-        matched_field = None
-        for field, pat in pat_header_map.items():
-            if re.search(pat, line, re.IGNORECASE):
-                matched_field = field
-                break
-        
-        if matched_field:
-            used_indices.add(i)
-            
-            # 直後から数行先までスキャンして、条件に合う値を探す
-            offset = 1
-            max_scan = 8 # 探索範囲を少し広げる（メールアドレス対策）
-            
-            while i + offset < len(lines) and offset < max_scan:
-                idx = i + offset
-                target_line = lines[idx]
-                
-                # 自分以外のヘッダーかどうかチェック
-                is_other_header = False
-                for f, p in pat_header_map.items():
-                    if f != matched_field and re.search(p, target_line, re.IGNORECASE):
-                        is_other_header = True
-                        break
-                
-                # 他のヘッダーなら、値ではないのでスキップ（探索は続ける：ヘッダーのさらに下に値があるかも）
-                if is_other_header:
-                    pass 
-                elif idx in used_indices:
-                    pass # 既に使用済みならスキップ
-                else:
-                    # ここでバリデーション！
-                    is_ok = True
-                    if matched_field in validators:
-                        if not validators[matched_field](target_line):
-                            is_ok = False
-                    
-                    if is_ok:
-                        data[matched_field] = target_line
-                        used_indices.add(idx)
-                        break # 値が見つかったので探索終了
-                
-                offset += 1
-
-    # 2. まだ埋まっていない項目をスキャン (住所など)
-    if not data["住所"]:
-        for i, line in enumerate(lines):
-            if i in used_indices: continue
-            if re.search(pat_pref, line):
-                clean_addr = re.sub(r'(住所|Address|住\s*所)[:：\s]*', '', line).strip()
-                data["住所"] = clean_addr
-                used_indices.add(i)
-                break
-
-    # 3. 電話、メール、日程の補完 (Regex検索)
-    full_text = text
-    if not data["電話番号"]:
-        tels = re.findall(r'0\d{1,4}[-\s]?\d{1,4}[-\s]?\d{3,4}', full_text)
-        for t in tels:
-            if len(re.sub(r'\D','',t)) >= 9:
-                data["電話番号"] = t
-                break
-    
-    if not data["メールアドレス"]:
-        mails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', full_text)
-        if mails: data["メールアドレス"] = mails[0]
-
-    if not data["チェックイン日"]:
-        dates = re.findall(r'(\d{4})[\./\-](\d{1,2})[\./\-](\d{1,2})', full_text)
-        if len(dates) >= 1:
-             data["チェックイン日"] = f"{dates[0][0]}/{dates[0][1]}/{dates[0][2]}"
-        if len(dates) >= 2:
-             data["チェックアウト日"] = f"{dates[1][0]}/{dates[1][1]}/{dates[1][2]}"
-
-    # クリーニング
-    def clean(t): 
-        if not t: return ""
-        t = re.sub(r'(氏名|名前|住所|電話|メール|職業|年齢|チェックイン|チェックアウト)', '', t).strip()
-        t = re.sub(r'^[:：\s]+', '', t).strip()
-        return t
-
-    for k in data:
-        data[k] = clean(data[k])
-
-    return data
+        st.error(f"API Batch Error: {e}")
+        return None, ""
 
 def show_custom_success_animation():
     image_path = "assets/nanji_v2.png"
@@ -293,7 +268,6 @@ def main():
         
         with col1:
             st.subheader("1. 予約カード読込")
-            use_enhance = st.checkbox("手書き文字補正を行う (推奨)", value=True, help="文字を濃くし、影を除去して読み取りやすくします。")
             st.image(final_image, caption='読込画像', use_container_width=True)
             
             if st.button("🔍 OCR解析実行", type="primary"):
@@ -302,21 +276,19 @@ def main():
                     final_image.save(img_byte_arr, format=final_image.format or 'JPEG')
                     target_bytes = img_byte_arr.getvalue()
                     
-                    if use_enhance:
-                        target_bytes, processed_cv2_img = preprocess_image(target_bytes)
-                        with st.expander("補正後の画像を確認"):
-                            st.image(processed_cv2_img, caption="AIが見ている画像", clamp=True, channels='GRAY', use_container_width=True)
+                    # 1. 傾き補正およびセル切り出し
+                    aligned_img, crops_dict = get_aligned_card_and_crops(target_bytes)
                     
-                    # 標準TextDetectionに戻す
-                    response = perform_ocr_document(target_bytes, creds)
+                    # 補正後の画像をUIに表示（確認用）
+                    with st.expander("補正後の画像を確認", expanded=True):
+                        st.image(aligned_img, caption="補正および規格化されたカード画像", channels='BGR', use_container_width=True)
                     
-                    if response:
-                        # 線形テキスト解析を実行
-                        full_text = extract_text_content(response)
-                        parsed_data = linear_text_parsing(full_text)
-                        
+                    # 2. バッチOCRを実行
+                    parsed_data, raw_text_summary = perform_ocr_batch(crops_dict, creds)
+                    
+                    if parsed_data:
                         st.session_state['ocr_result'] = parsed_data
-                        st.session_state['raw_text'] = full_text
+                        st.session_state['raw_text'] = raw_text_summary
                         st.success("解析完了")
                     else:
                         st.error("読み取り失敗")
@@ -330,6 +302,7 @@ def main():
                 with st.form("verify_form"):
                     cols = st.columns(2)
                     name = cols[0].text_input("氏名 (A列)", value=data.get("氏名"))
+                    furigana = cols[0].text_input("フリガナ (非転記)", value=data.get("フリガナ"))
                     age = cols[0].text_input("年齢 (B列)", value=data.get("年齢"))
                     job = cols[0].text_input("ご職業 (C列)", value=data.get("職業"))
                     phone = cols[0].text_input("電話番号 (E列)", value=data.get("電話番号"))
@@ -348,7 +321,6 @@ def main():
                             gc = gspread.authorize(creds)
                             sh = gc.open_by_url(SPREADSHEET_URL)
                             
-                            # シート名を指定して取得（インデックス0だとずれる可能性があるため）
                             target_sheet_name = 'シート1' 
                             try:
                                 ws = sh.worksheet(target_sheet_name)
@@ -361,28 +333,14 @@ def main():
                             write_data = [name, age, job, address, phone, email, checkin, checkout]
                             st.write(f"書き込みデータを確認: {write_data}")
                             
-                            # append_rowだと列がずれる場合があるため、明示的に書き込む
-                            # 「上から順に見て、空いている最初の行」を探すロジックに変更
+                            # 空き行を探す
                             col_a = ws.col_values(1)
+                            target_row_index = len(col_a) + 1
                             
-                            target_row_index = len(col_a) + 1 # デフォルトは末尾
-                            
-                            # ヘッダー(1行目)があるので、2行目(index 1)からチェック
-                            # 途中に空きがあればそこ埋める
                             for i in range(1, len(col_a)):
                                 if not col_a[i].strip():
                                     target_row_index = i + 1
                                     break
-                            
-                            # もしcol_aの長さよりデータの行数がスプレッドシート上で多い場合（途中に空白セルがある場合）
-                            # col_valuesは「値のある最後の行」までしか返さないことがあるため、
-                            # 念のため get_all_values() でチェックして、本当に空いているか確認するのが確実だが、
-                            # 簡易的に「col_valuesで見つけた空き」または「末尾」に書く。
-                            # 今回のケース（2-12が空白）なら、col_valuesは1行目までしか返ってこないか、
-                            # あるいは13行目まで返ってきて2行目が空文字になっているはず。
-                            
-                            # col_values が ['氏名', '', '', ..., '山田'] のようになっている場合 -> index 1が見つかる
-                            # col_values が ['氏名'] だけの場合 -> 2行目に書く
                             
                             next_row = target_row_index
                             
