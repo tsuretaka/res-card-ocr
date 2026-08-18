@@ -131,18 +131,19 @@ def get_aligned_card_and_crops(image_bytes, use_enhance=True):
     else:
         aligned = cv2.resize(img, (target_w, target_h))
 
-    # 3. 9つの手書きセル枠の切り出し座標 (ymin, xmin, ymax, xmax)
-    # ※見出し文字を避けて切り出します
+    # 3. 10個の手書きセル枠の切り出し座標 (ymin, xmin, ymax, xmax)
+    # ※最新の生年月日(年齢から変更)およびメール配信付きレイアウトに最適化
     crop_definitions = {
         "氏名": (47, 0, 94, 220),
-        "フリガナ": (47, 220, 94, 550),
-        "年齢": (47, 550, 94, 780),
-        "職業": (47, 780, 94, 1000),
+        "フリガナ": (47, 220, 94, 440),        # 22%幅
+        "生年月日": (47, 440, 94, 770),        # 年齢から生年月日に変更 (33%幅)
+        "職業": (47, 770, 94, 1000),          # 23%幅
         "住所": (126, 0, 173, 1000),
         "電話番号": (205, 0, 252, 330),
         "メールアドレス": (205, 330, 252, 1000),
         "チェックイン日": (288, 0, 335, 330),
-        "チェックアウト日": (288, 330, 335, 1000)
+        "チェックアウト日": (288, 330, 335, 765), # 右端を765に変更
+        "メール配信": (288, 765, 335, 1000)       # 新規追加 (可/不可の◯判定用)
     }
 
     crops = {}
@@ -165,17 +166,37 @@ def get_aligned_card_and_crops(image_bytes, use_enhance=True):
 
     return aligned, crops
 
+def clean_date_string(text):
+    """
+    手書き日付（年月日）から数字を抽出し YYYY/MM/DD 形式に標準化する
+    """
+    nums = re.findall(r'\d+', text)
+    if len(nums) == 3:
+        year = nums[0]
+        month = nums[1].zfill(2)
+        day = nums[2].zfill(2)
+        if len(year) == 2:
+            year = "20" + year
+        return f"{year}/{month}/{day}"
+    
+    # 抽出失敗時は簡易置換による整形
+    text = re.sub(r'[\s年月日の\.\-/]+', '/', text).strip('/')
+    return text
+
 def perform_ocr_batch(crops_dict, credentials):
     """
     Google Vision API の batch_annotate_images を利用し、
-    9つの画像を一度のリクエストでOCR解析する。
+    画像を一度のリクエストでOCR解析、または画像処理判定を行う。
     """
     try:
         client = vision.ImageAnnotatorClient(credentials=credentials)
         requests = []
         keys = list(crops_dict.keys())
         
-        for key in keys:
+        # "メール配信"以外をVision APIへリクエスト
+        ocr_keys = [k for k in keys if k != "メール配信"]
+        
+        for key in ocr_keys:
             image_content = crops_dict[key]
             image = vision.Image(content=image_content)
             request = vision.AnnotateImageRequest(
@@ -188,13 +209,15 @@ def perform_ocr_batch(crops_dict, credentials):
         response = client.batch_annotate_images(requests=requests)
         
         parsed_data = {
-            "氏名": "", "フリガナ": "", "年齢": "", "職業": "", "住所": "",
-            "電話番号": "", "メールアドレス": "", "チェックイン日": "", "チェックアウト日": ""
+            "氏名": "", "フリガナ": "", "生年月日": "", "職業": "", "住所": "",
+            "電話番号": "", "メールアドレス": "", "チェックイン日": "", "チェックアウト日": "",
+            "メール配信": "未選択"
         }
         raw_texts = []
         
+        # OCR結果のパース
         for idx, res in enumerate(response.responses):
-            key = keys[idx]
+            key = ocr_keys[idx]
             if res.error.message:
                 print(f"Error on {key}: {res.error.message}")
                 continue
@@ -203,15 +226,44 @@ def perform_ocr_batch(crops_dict, credentials):
             if res.text_annotations:
                 text = res.text_annotations[0].description.strip()
             
-            # 日付セル（チェックイン・アウト）にプリプリントされている「年月日」を取り除くクリーンアップ
-            if "日" in key:
-                text = re.sub(r'[\s年月日の]+', '/', text).strip('/')
-            
-            # 全般的なクリーニング
-            text = re.sub(r'^[:：\s]+', '', text).strip()
+            # 日付系項目のクリーンアップ
+            if key in ["生年月日", "チェックイン日", "チェックアウト日"]:
+                text = clean_date_string(text)
+            else:
+                # 全般的なクリーニング
+                text = re.sub(r'^[:：\s]+', '', text).strip()
             
             parsed_data[key] = text
             raw_texts.append(f"【{key}】: {text}")
+            
+        # "メール配信" の◯判定 (OpenCVの黒画素密度解析)
+        if "メール配信" in crops_dict:
+            image_content = crops_dict["メール配信"]
+            nparr = np.frombuffer(image_content, np.uint8)
+            crop_img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+            
+            # 二値化 (背景を黒(0)、手書き・文字を白(255)にする)
+            _, thresh = cv2.threshold(crop_img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            h, w = thresh.shape
+            
+            # 左右に分割 (左: 可, 右: 不可)
+            left_half = thresh[:, :w//2]
+            right_half = thresh[:, w//2:]
+            
+            left_pixels = np.sum(left_half == 255)
+            right_pixels = np.sum(right_half == 255)
+            
+            # 印刷文字「可」(1文字)と「不可」(2文字)の基本画素数の差を補正して判定
+            # 手書きの◯がある側が劇的に画素数増となる
+            if left_pixels > right_pixels * 1.3 + 120:
+                consent = "可"
+            elif right_pixels > left_pixels * 1.1 + 120:
+                consent = "不可"
+            else:
+                consent = "未選択"
+                
+            parsed_data["メール配信"] = consent
+            raw_texts.append(f"【メール配信 (自動判定)】: {consent} (左画素:{left_pixels}, 右画素:{right_pixels})")
             
         return parsed_data, "\n".join(raw_texts)
         
@@ -274,7 +326,6 @@ def main():
         
         with col1:
             st.subheader("1. 予約カード読込")
-            # チェックボックスを復活
             use_enhance = st.checkbox("手書き文字補正を行う (推奨)", value=True, help="文字を濃くし、影を除去して読み取りやすくします。")
             st.image(final_image, caption='読込画像', use_container_width=True)
             
@@ -284,7 +335,7 @@ def main():
                     final_image.save(img_byte_arr, format=final_image.format or 'JPEG')
                     target_bytes = img_byte_arr.getvalue()
                     
-                    # 1. 傾き補正およびセル切り出し (use_enhance引数を追加)
+                    # 1. 傾き補正およびセル切り出し
                     aligned_img, crops_dict = get_aligned_card_and_crops(target_bytes, use_enhance=use_enhance)
                     
                     # 補正後の画像をUIに表示（確認用）
@@ -311,13 +362,21 @@ def main():
                     cols = st.columns(2)
                     name = cols[0].text_input("氏名 (A列)", value=data.get("氏名"))
                     furigana = cols[0].text_input("フリガナ (B列)", value=data.get("フリガナ"))
-                    age = cols[0].text_input("年齢 (C列)", value=data.get("年齢"))
+                    birthday = cols[0].text_input("生年月日 (C列)", value=data.get("生年月日"))
                     job = cols[0].text_input("ご職業 (D列)", value=data.get("職業"))
                     phone = cols[0].text_input("電話番号 (F列)", value=data.get("電話番号"))
                     checkin = cols[1].text_input("チェックイン日 (H列)", value=data.get("チェックイン日"))
                     checkout = cols[1].text_input("チェックアウト日 (I列)", value=data.get("チェックアウト日"))
                     email = cols[1].text_input("メールアドレス (G列)", value=data.get("メールアドレス"))
                     address = st.text_area("住所 (E列)", value=data.get("住所"), height=100)
+                    
+                    # メール配信可否の選択肢 (自動判定の結果をデフォルトにする)
+                    consent_val = data.get("メール配信", "未選択")
+                    try:
+                        consent_index = ["可", "不可", "未選択"].index(consent_val)
+                    except ValueError:
+                        consent_index = 2
+                    mail_consent = st.selectbox("お得情報のメール配信 (J列)", options=["可", "不可", "未選択"], index=consent_index)
                     
                     with st.expander("OCR生データを表示"):
                         st.text_area("解析前のテキスト", st.session_state.get('raw_text', ''), height=150)
@@ -338,8 +397,8 @@ def main():
                             
                             st.write(f"書き込み先シート名: {ws.title}")
                             
-                            # フリガナを含めた9項目の転記データ配列 (A〜I列)
-                            write_data = [name, furigana, age, job, address, phone, email, checkin, checkout]
+                            # J列まで含めた10項目のデータ配列 (A〜J列)
+                            write_data = [name, furigana, birthday, job, address, phone, email, checkin, checkout, mail_consent]
                             st.write(f"書き込みデータを確認: {write_data}")
                             
                             # 空き行を探す
@@ -353,7 +412,7 @@ def main():
                             
                             next_row = target_row_index
                             
-                            # A列のnext_row行目から書き込み (A〜I列へ一括update)
+                            # A列のnext_row行目から書き込み (A〜J列へ一括update)
                             ws.update(range_name=f'A{next_row}', values=[write_data])
                             
                             st.success(f"✅ シート '{ws.title}' の {next_row} 行目に追記しました")
